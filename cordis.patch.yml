@@ -1,4 +1,3 @@
 - insert:
-    - id: dsh-prompt-enhance
-      name: 'dsh-prompt-enhance'
-      config: {}
+    - id: prompt-enhance
+      name: '@local/dsh-prompt-enhance'

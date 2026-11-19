@@ -1,28 +1,11 @@
-/**
- * dsh-prompt-enhance —— 提示词增强（对齐 WorkBuddy「增强提示词」）
- *
- * 行为契约与「逐字一致的提示词 + 后处理」见 ./prompt.js 与 ./README.md。
- * 本文件负责 Host 侧两件事：
- *   1. 注册工具 `enhance_prompt`（模型可调用）；
- *   2. 注册同源 HTTP 通道 `/prompt-enhance`，供输入框右侧「增强」按钮调用。
- *
- * 这里直接构造 ToolDefinition（不过 @deepseek-ai/dsh-tools 的 defineTool），
- * 因为本地目录安装的包解析不到该宿主包；`parameters` 给出的就是 defineTool
- * 归一化后的同一份原始 JSON Schema，因此模型看到的 schema 完全一致。
- */
+import { createEnhancer } from './enhance.js'
 
-import { SYSTEM_PROMPT, buildUserPrompt, finalizeEnhanced } from './prompt.js'
-
-export const name = 'dsh-prompt-enhance'
+export const name = '@local/dsh-prompt-enhance'
 export const inject = ['tools']
 
-/** 补全墙钟上限（毫秒）；受工具自身 timeoutMs 兜底。 */
 const DEFAULT_TIMEOUT_MS = 60_000
-/** 工具级超时，始终大于补全超时，避免外层先杀掉再包装错误。 */
 const TOOL_TIMEOUT_MS = 90_000
-/** Web 通道路径（前端按钮同源 POST）。 */
 const ROUTE_PATH = '/prompt-enhance'
-/** 请求体上限（字符），防止误吞超大草稿。 */
 const MAX_BODY_CHARS = 256 * 1024
 
 function nonEmpty(value) {
@@ -39,60 +22,6 @@ function readOptions(config) {
   }
 }
 
-/**
- * 解析实际路由：参数 > 插件配置 > 当前默认模型。
- * `model` 参数支持 `model-id` 或 `provider/model-id`（按第一个 `/` 切分）。
- */
-function resolveRoute(ctx, options, argModel) {
-  let provider = options.provider
-  let model = options.model
-  const override = nonEmpty(argModel)
-  if (override) {
-    const slash = override.indexOf('/')
-    if (slash > 0) {
-      provider = override.slice(0, slash)
-      model = override.slice(slash + 1)
-    } else {
-      model = override
-    }
-  }
-  if (!provider || !model) {
-    const selection = ctx.get('agentDefaultModel')?.currentSelection?.()
-    provider = provider ?? nonEmpty(selection?.provider)
-    model = model ?? nonEmpty(selection?.model)
-  }
-  if (!provider || !model) return undefined
-  return { provider, model }
-}
-
-function failure(code, error) {
-  return { success: false, text: '', code, error }
-}
-
-/** 抽出 assistant 文本：累加 `text-delta`，并捕获终止原因。 */
-async function collectText(stream) {
-  let text = ''
-  let failureMessage
-  let aborted = false
-  for await (const chunk of stream) {
-    if (!chunk || typeof chunk !== 'object') continue
-    if (chunk.type === 'text-delta' && typeof chunk.text === 'string') {
-      text += chunk.text
-      continue
-    }
-    if (chunk.type === 'finish') {
-      const kind = chunk.reason?.kind
-      if (kind === 'error') {
-        failureMessage = chunk.reason?.failure?.message || 'LLM completion failed'
-      } else if (kind === 'aborted') {
-        aborted = true
-        failureMessage = chunk.reason?.failure?.message || 'Request aborted'
-      }
-    }
-  }
-  return { text, failureMessage, aborted }
-}
-
 function messageOf(error) {
   return error instanceof Error ? error.message : String(error ?? '')
 }
@@ -103,7 +32,12 @@ function rejectRequest(ctx, req) {
     const connection = ctx.get?.('connection')
     const reject = connection?.requestRejection
     if (typeof reject !== 'function') return 403
-    return reject.call(connection, { headers: req.headers }) ?? undefined
+    const value = reject.call(connection, { headers: req.headers })
+    // undefined / null 是「放行」信号；合法的 HTTP 状态码表示拒绝。
+    // 其余取值（0、false、NaN、非整数、对象…）统一 fail-closed，避免传入 writeHead。
+    if (value === undefined || value === null) return undefined
+    if (Number.isInteger(value) && value >= 100 && value < 600) return value
+    return 403
   } catch {
     return 403
   }
@@ -113,21 +47,31 @@ function readBody(req) {
   return new Promise((resolve, reject) => {
     const chunks = []
     let bytes = 0
+    let settled = false
+    const finish = (value) => {
+      if (settled) return
+      settled = true
+      value()
+    }
     req.on('data', (chunk) => {
+      if (settled) return
       bytes += chunk.length
       if (bytes > MAX_BODY_CHARS) {
-        reject(new Error('request body too large'))
-        req.destroy()
+        finish(() => {
+          reject(new Error('request body too large'))
+          req.destroy()
+        })
         return
       }
       chunks.push(chunk)
     })
-    req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')))
-    req.on('error', reject)
+    req.on('end', () => finish(() => resolve(Buffer.concat(chunks).toString('utf8'))))
+    req.on('error', (error) => finish(() => reject(error)))
   })
 }
 
 function sendJson(res, status, value) {
+  if (res.writableEnded || res.destroyed) return
   const body = JSON.stringify(value)
   res.writeHead(status, {
     'content-type': 'application/json; charset=utf-8',
@@ -137,17 +81,19 @@ function sendJson(res, status, value) {
   res.end(body)
 }
 
-function createRouteHandler(ctx, options, enhance) {
+function createRouteHandler(ctx, enhance) {
   return (req, res) => {
-    void (async () => {
+    ;(async () => {
       const rejection = rejectRequest(ctx, req)
       if (rejection !== undefined) {
         sendJson(res, rejection, { success: false, code: 'forbidden', error: 'request rejected' })
         return
       }
       if (req.method !== 'POST') {
-        res.writeHead(405, { allow: 'POST' })
-        res.end()
+        if (!res.writableEnded && !res.destroyed) {
+          res.writeHead(405, { allow: 'POST' })
+          res.end()
+        }
         return
       }
       let payload
@@ -160,12 +106,22 @@ function createRouteHandler(ctx, options, enhance) {
       }
       const text = payload && typeof payload.text === 'string' ? payload.text : ''
       const model = payload && typeof payload.model === 'string' ? payload.model : undefined
-      const envelope = await enhance(text, model, undefined)
+      // 浏览器断开时取消补全，避免为无人等待的响应继续消耗额度。
+      const disconnect = new AbortController()
+      const onClose = () => disconnect.abort()
+      res.once?.('close', onClose)
+      let envelope
+      try {
+        envelope = await enhance(text, model, disconnect.signal)
+      } finally {
+        res.off?.('close', onClose)
+      }
+      if (disconnect.signal.aborted) return
       sendJson(res, 200, envelope)
     })().catch((error) => {
       if (!res.headersSent) {
         sendJson(res, 500, { success: false, code: 'unknown', error: messageOf(error) })
-      } else {
+      } else if (!res.writableEnded && !res.destroyed) {
         res.destroy()
       }
     })
@@ -173,60 +129,7 @@ function createRouteHandler(ctx, options, enhance) {
 }
 
 export function apply(ctx, config) {
-  const options = readOptions(config)
-
-  async function enhance(rawText, modelArg, signal) {
-    const input = typeof rawText === 'string' ? rawText : ''
-    // 空输入不发起模型调用（WorkBuddy 同款短路）。
-    if (input.trim() === '') return failure('empty_input', 'Empty input')
-
-    const llm = ctx.get('llm')
-    if (!llm || typeof llm.stream !== 'function') {
-      return failure('llm_unavailable', 'LLM service is not available')
-    }
-
-    const route = resolveRoute(ctx, options, modelArg)
-    if (!route) {
-      return failure('llm_unavailable', 'No model route is selected')
-    }
-
-    const controller = new AbortController()
-    let timedOut = false
-    const timer = setTimeout(() => {
-      timedOut = true
-      controller.abort()
-    }, options.timeoutMs)
-    const forwardAbort = () => controller.abort()
-    signal?.addEventListener('abort', forwardAbort, { once: true })
-
-    try {
-      const stream = llm.stream({
-        provider: route.provider,
-        model: route.model,
-        system: SYSTEM_PROMPT,
-        messages: [
-          { role: 'user', content: [{ type: 'text', text: buildUserPrompt(input) }] },
-        ],
-        signal: controller.signal,
-      })
-      const { text, failureMessage, aborted } = await collectText(stream)
-      if (failureMessage) {
-        if (timedOut) return failure('llm_error', `Request timed out after ${options.timeoutMs}ms`)
-        if (aborted) return failure('llm_error', failureMessage)
-        return failure('llm_error', failureMessage)
-      }
-      const final = finalizeEnhanced(text)
-      if (!final.ok) return failure(final.code, final.error)
-      return { success: true, text: final.text }
-    } catch (error) {
-      if (timedOut) return failure('llm_error', `Request timed out after ${options.timeoutMs}ms`)
-      if (controller.signal.aborted) return failure('llm_error', 'Request aborted')
-      return failure('unknown', messageOf(error) || 'prompt enhancement failed')
-    } finally {
-      clearTimeout(timer)
-      signal?.removeEventListener('abort', forwardAbort)
-    }
-  }
+  const enhance = createEnhancer({ get: (name) => ctx.get?.(name), ...readOptions(config) })
 
   ctx.tools.register({
     name: 'enhance_prompt',
@@ -235,15 +138,10 @@ export function apply(ctx, config) {
     parameters: {
       type: 'object',
       properties: {
-        text: {
-          type: 'string',
-          description:
-            '用户原始提示词，按用户写下的原样传入；不要预先改写，也不要用它代替本工具去回答原请求。空白输入直接返回 success=false（code=empty_input），不会调用模型。',
-        },
+        text: { type: 'string', description: '需要被增强的原始提示词' },
         model: {
           type: 'string',
-          description:
-            '可选模型覆盖，写 `model-id` 或 `provider/model-id`；省略时依次使用插件配置与当前默认模型。',
+          description: '可选的模型路由，格式为 provider/model；缺省时使用当前会话模型',
         },
       },
       required: ['text'],
@@ -251,36 +149,40 @@ export function apply(ctx, config) {
     output: {
       schema: {
         type: 'object',
-        additionalProperties: false,
         properties: {
-          success: { type: 'boolean', description: '是否得到可用的增强结果。' },
-          text: { type: 'string', description: '成功时是增强后的提示词；失败时为空串。' },
+          success: { type: 'boolean' },
+          text: { type: 'string' },
           code: {
             type: 'string',
-            description: '失败代码：empty_input | llm_unavailable | llm_error | unknown。',
+            enum: ['empty_input', 'llm_unavailable', 'llm_error', 'unknown'],
           },
-          error: { type: 'string', description: '失败原因（人类可读）。' },
+          error: { type: 'string' },
         },
         required: ['success', 'text'],
       },
       render: (_args, value) => {
         if (value && value.success) return [{ type: 'text', text: value.text }]
-        const code = value?.code ?? 'unknown'
-        const detail = value?.error ?? 'prompt enhancement failed'
+        const code = value && value.code ? value.code : 'unknown'
+        const detail = value && value.error ? value.error : 'unknown error'
         return [{ type: 'text', text: `[${code}] ${detail}` }]
       },
-      presentationMeta: (_args, value) => ({
-        success: value?.success === true,
-        chars: typeof value?.text === 'string' ? value.text.length : 0,
-        ...(value?.code ? { code: value.code } : {}),
-      }),
+    },
+    presentationMeta: (value) => {
+      const success = Boolean(value && value.success)
+      const meta = { success, chars: value && typeof value.text === 'string' ? value.text.length : 0 }
+      if (!success && value && value.code) meta.code = value.code
+      return meta
     },
     presentCall: () => ({ card: 'generic', title: '增强提示词', kind: 'other', content: [] }),
-    presentResult: (_args, { isError, meta }) => ({
-      card: 'generic',
-      title: isError || meta?.success !== true ? '增强提示词 · 失败' : '增强提示词 · 已改写',
-      content: [],
-    }),
+    presentResult: (value) => {
+      const isError = !value || !value.success
+      return {
+        card: 'generic',
+        title: isError ? '增强失败' : '提示词已增强',
+        kind: 'other',
+        content: [],
+      }
+    },
     timeoutMs: TOOL_TIMEOUT_MS,
     async execute(args, exec) {
       const input = args && typeof args === 'object' ? args : {}
@@ -288,14 +190,13 @@ export function apply(ctx, config) {
     },
   })
 
-  // 输入框按钮的同源通道；webServer 缺席（非 Web 宿主）时静默跳过。
   ctx.inject(['webServer'], (c) => {
     const server = c.webServer
     if (!server || typeof server.register !== 'function') return
     server.register({
       kind: 'exact',
       path: ROUTE_PATH,
-      handler: createRouteHandler(ctx, options, enhance),
+      handler: createRouteHandler(ctx, enhance),
     })
   })
 }

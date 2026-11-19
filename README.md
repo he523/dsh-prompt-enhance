@@ -2,22 +2,20 @@
 
 把用户写下的**原始提示词**改写成**更清晰、更具体的提示词**，只返回改写结果本身；增强规则与输出契约对齐 WorkBuddy（CodeBuddy 桌面端）内置的「增强提示词」——**规则等价、措辞原创**（指令文本为本项目自行撰写，不含任何第三方文本），可脱离 WorkBuddy 独立运行。
 
-- 能力入口：输入框右侧「✦ 增强」按钮；Host 工具 `enhance_prompt`——**零第三方依赖**，只用 DSH 自带的 `llm` 服务与 Web 槽位
-- **只产出提示词、不回答提示词**：输出固定信封 `{ success, text }`，空白输入直接返回 `empty_input`
-- 契约对齐 WorkBuddy（规则等价、措辞原创），**不依赖**其安装目录、sidecar 或任何网络私有接口
+- 能力入口：输入框右侧的**纯图标按钮**（无文字，双火花星，悬停显示「增强提示词」）；Host 工具 `enhance_prompt`
+- 运行依赖：DSH 的 `llm` 服务（有可用模型路由即可）
+- 不依赖：WorkBuddy 安装目录、其 sidecar、任何网络私有接口、任何 npm 依赖
 
 ## 安装
 
 ```powershell
-# 从 GitHub 安装（当前会话所在的 profile），不走 npm 源
+# 从 GitHub 安装（当前会话所在的 profile）
 dsh plugin --profile web add github:sun04222/dsh-prompt-enhance
+
+# 装了 dsh-market / dsh-m 的话，也可以直接在市场里搜「提示词增强」一键安装
 ```
 
 安装后在设置 → 插件里能看到「提示词增强」；前端按钮需要刷新一次页面。
-
-## 快速开始
-
-设置 → 插件确认「提示词增强」已启用 → 输入框右侧点「✦ 增强」→ 草稿被替换为改写版；改坏了点「恢复原文」（手动改过草稿后该按钮自动消失，对齐 WorkBuddy 的 `contentDiverged`）。
 
 ---
 
@@ -25,8 +23,8 @@ dsh plugin --profile web add github:sun04222/dsh-prompt-enhance
 
 | 能力点 | WorkBuddy 5.8.3 | 本插件 |
 | --- | --- | --- |
-| 提示词入口 | 输入框工具栏「增强提示词」按钮 | 输入框右侧「增强」按钮 **+** 工具 `enhance_prompt` |
-| 主进程实现 | `main/server.js` · `handleEnhancePrompt()` / `registerEnhancePromptHandlers()` | `index.js` · `enhance()` |
+| 提示词入口 | 输入框工具栏「增强提示词」按钮 | 输入框右侧**同形态的纯图标按钮**（无文字）**+** 工具 `enhance_prompt` |
+| 主进程实现 | `main/server.js` · `handleEnhancePrompt()` / `registerEnhancePromptHandlers()` | `index.js` · Host 适配与注册；`enhance.js` · `createEnhancer()` 核心管线 |
 | IPC 通道 | `llm:enhancePrompt` | 无（同进程 Host 工具） |
 | 模型调用 | sidecar `POST /api/v1/llm/completions`，`agentName: enhance-prompt` | `ctx.llm.stream()`，单次补全 |
 | 系统提示词 | 变量 `zn` | `prompt.js` · `SYSTEM_PROMPT`（同一套规则，原创措辞） |
@@ -44,7 +42,7 @@ WorkBuddy 侧证据（仅用于确认契约，未复制其文本或代码；安�
 
 ## 2. 核心行为
 
-两个入口（输入框「增强」按钮、工具 `enhance_prompt`）共用同一条管线：
+两个入口（输入框图标按钮、工具 `enhance_prompt`）共用 `enhance.js` 中 `createEnhancer()` 创建的同一条管线；`index.js` 只负责配置读取、工具注册和 Web 传输适配，避免核心生命周期与 HTTP 细节耦合：
 
 1. **空输入短路**：`text.trim() === ''` 直接返回 `empty_input`，**不发起模型调用**。
 2. **解析模型路由**：参数 `model` > 插件配置 `provider`/`model` > 当前默认模型（`agentDefaultModel.currentSelection()`）。
@@ -54,19 +52,26 @@ WorkBuddy 侧证据（仅用于确认契约，未复制其文本或代码；安�
 
 整个过程不执行用户提示词里的任何请求（不写代码、不回答问题），只产出「改写后的提示词」。
 
-### 2.1 输入框按钮（对齐 WorkBuddy 的点击式交互）
+### 2.1 输入框按钮（纯图标，交互对齐 WorkBuddy）
 
-| 状态 | 按钮 | 点击后 |
+按钮只画一枚 16×16 图标，**界面上不出现任何文字**；状态与失败原因全部通过 `title`（原生 tooltip）与 `aria-label`（读屏器）表达。形态对齐宿主 composer 自带的圆形按钮：28×28、无边框、透明底、悬停用 `--dsw-alias-interactive-bg-hover-solid`。
+
+| 状态 | 图标 | 点击后 |
 | --- | --- | --- |
-| 空闲（草稿非空） | `✦ 增强` | 把当前草稿发给 Host 增强，成功后**整段替换草稿**并记住原文 |
-| 增强中 | `✦ 增强中…`（禁用） | — |
-| 已增强且草稿未被改动 | `↩ 恢复原文` | 还原成点击前的原文 |
-| 已增强但用户又改了草稿 | 自动回到 `✦ 增强` | 再次增强当前草稿 |
-| 失败 | `⚠ 增强失败`（title 显示原因） | 重试 |
-| 草稿为空 | 禁用 | — |
+| 空闲（草稿非空） | 双火花星 | 把当前草稿发给 Host 增强，成功后**整段替换草稿**并记住原文 |
+| 增强中 | 旋转环 | **取消**本次增强：中止在途请求，草稿原样保留 |
+| 已增强且草稿未被改动 | 环形箭头 | 还原成点击前的原文（品牌色） |
+| 已增强但用户又改了草稿 | 自动退回双火花星 | 再次增强当前草稿 |
+| 失败 | 警告三角 | 重试；`title` 显示失败原因（错误色） |
+| 草稿为空 | 双火花星（半透明、不可点） | — |
 
 - 草稿被手动改过即丢弃「恢复原文」（对齐 WorkBuddy 的 `contentDiverged`）。
+- 增强中按钮**不置灰而是可点**，点即取消（对齐 WorkBuddy 的 `cancellable` 分支）；旧实现是置灰等结果。
+- 按下时 `preventDefault()` 保住输入框焦点（对齐宿主 composer 的 `keepFocus`）。
+- 图标动画用 SVG 自带 `<animateTransform>`，不注入 `<style>`／`@keyframes`，插件依旧零 DOM 副作用、零第三方依赖。
 - 切换会话自动重置；组件卸载时取消在途请求。
+- 请求以实时在途状态判断取消，不依赖 React 已完成重渲染；快速重复点击不会误发第二次请求。
+- 等待期间只要草稿发生过编辑，即使后来改回原文，旧响应也会失效；空或缺字段的成功响应保留原草稿并允许重试。
 - 与 Host 的唯一通道是同源 `POST /prompt-enhance`，请求/响应体与工具的信封完全一致。
 
 ---
@@ -181,7 +186,7 @@ WorkBuddy 侧证据（仅用于确认契约，未复制其文本或代码；安�
 **与 WorkBuddy 的差异（均不影响输入输出契约）**：
 
 1. **指令文本原创**：规则一致、措辞自行撰写，因此模型的文风可能与原应用略有出入；这是为公开分发有意做的取舍（见 `THIRD_PARTY_NOTICES.md`）。
-2. 按钮位置：WorkBuddy 在输入框右下角工具区；本插件挂在 `conversation.input.right`（提交按钮前），受宿主布局约束。
+2. 按钮位置：WorkBuddy 在输入框右下角工具区；本插件挂在 `conversation.input.right`（提交按钮前），受宿主布局约束。按钮形态两边一致：纯图标、无文字。
 3. `model` 语义：WorkBuddy 传模型 id 给 sidecar；本插件传 `provider/model` 路由，省略时取默认模型。
 4. `$&` 替换修正：原应用把用户原文当替换模式，本插件按字面量插入。
 
@@ -218,9 +223,15 @@ dsh plugin --profile web add github:sun04222/dsh-prompt-enhance   # 从 GitHub �
 本地开发时安装后无需重启即可用；再次修改代码后需把该 bundle 关一次再开，才会重新载入新模组。
 
 ```powershell
-node test/prompt.test.mjs                  # 纯函数单测（10 项，进程内运行）
-node --check index.js; node --check prompt.js; node --check client.js
+node --test test/prompt.test.mjs           # 纯函数单测
+node --test test/host.test.mjs             # Host 侧：身份、路由、fail-closed
+node --test test/client.test.mjs           # 客户端：会话隔离、在途输入优先、取消、纯图标
+node --test test/enhance.test.mjs          # 核心管线：路由、取消/超时、有界流收集
+node --test test/package.test.mjs          # 发布面：exports、打包清单、本地身份
+node --check index.js; node --check enhance.js; node --check prompt.js; node --check client.js
 ```
+
+按钮相关的三条关键断言（`test/client.test.mjs`）：切换会话不落旧结果、等待期间打字优先、增强中再点 = 取消且草稿不变；另有 `the button renders an icon only, with no visible text node` 遍历渲染树，断言按钮内**没有任何可见文字节点**、只有一个 `svg` 子节点。
 
 > 沙箱下 `node --test test/` 会因子进程管道 EPERM 失败，直接跑测试文件即可（`node:test` 在同进程执行）。
 

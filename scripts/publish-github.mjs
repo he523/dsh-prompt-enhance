@@ -20,9 +20,6 @@
  *   --release           also create a release for --tag
  *   --topics a,b,c      replace repository topics (default: dsh-plugin,…)
  *   --description "…"   repository description
- *   --homepage <url>    repository homepage (default: <repo>#readme; pass "" to clear)
- *   --private           create the repository as private on first publish
- *   --message "…"       commit message (default: chore: publish <name> <tag>)
  *   --dry-run           print what would be uploaded, change nothing
  */
 import { readdir, readFile, stat } from 'node:fs/promises'
@@ -38,7 +35,7 @@ const SKIP_DIRS = new Set(['node_modules', '.git', '.pnpm-store', 'dist'])
 const SKIP_FILES = new Set(['.DS_Store', 'Thumbs.db'])
 
 function parseArgs(argv) {
-  const out = { branch: 'main', release: false, dryRun: false, private: false, homepage: undefined }
+  const out = { branch: 'main', release: false, dryRun: false }
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]
     const next = () => {
@@ -52,9 +49,6 @@ function parseArgs(argv) {
     else if (arg === '--tag') out.tag = next()
     else if (arg === '--topics') out.topics = next().split(',').map((t) => t.trim()).filter(Boolean)
     else if (arg === '--description') out.description = next()
-    else if (arg === '--homepage') out.homepage = next()
-    else if (arg === '--private') out.private = true
-    else if (arg === '--message') out.message = next()
     else if (arg === '--release') out.release = true
     else if (arg === '--dry-run') out.dryRun = true
     else throw new Error(`unknown option ${arg}`)
@@ -138,7 +132,6 @@ async function main() {
   const root = options.dir ? options.dir : join(dirname(fileURLToPath(import.meta.url)), '..')
   const topics = options.topics ?? DEFAULT_TOPICS
   const description = options.description ?? DEFAULT_DESCRIPTION
-  const homepage = options.homepage === undefined ? `https://github.com/${options.repo}#readme` : options.homepage
 
   await stat(root)
   const files = await collect(root)
@@ -152,11 +145,11 @@ async function main() {
 
   const existing = await api('GET', `/repos/${owner}/${name}`, undefined, { allow404: true })
   if (existing === undefined) {
-    console.log(`\ncreating ${options.private ? 'private' : 'public'} repository ${options.repo}`)
+    console.log(`\ncreating public repository ${options.repo}`)
     await api('POST', '/user/repos', {
       name,
       description,
-      private: options.private,
+      private: false,
       has_issues: true,
       auto_init: false,
     })
@@ -205,7 +198,7 @@ async function main() {
     ...(baseTreeSha ? { base_tree: baseTreeSha } : {}),
   })
   const commit = await api('POST', `/repos/${owner}/${name}/git/commits`, {
-    message: options.message ?? `chore: publish ${name} ${options.tag ?? ''}`.trim(),
+    message: `chore: publish ${name} ${options.tag ?? ''}`.trim(),
     tree: treeResult.sha,
     parents: parentSha ? [parentSha] : [],
   })
@@ -226,10 +219,9 @@ async function main() {
 
   await api('PATCH', `/repos/${owner}/${name}`, {
     description,
-    homepage,
+    homepage: `https://github.com/${options.repo}#readme`,
   })
   await api('PUT', `/repos/${owner}/${name}/topics`, { names: topics })
-  console.log(`homepage: ${homepage || '(cleared)'}`)
   console.log(`topics: ${topics.join(', ')}`)
 
   if (options.tag) {
