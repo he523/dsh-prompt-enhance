@@ -10,7 +10,10 @@
 
 ```powershell
 # 从 GitHub 安装（当前会话所在的 profile）
-dsh plugin --profile web add github:sun04222/dsh-prompt-enhance
+dsh plugin --profile web add github:he523/dsh-prompt-enhance
+
+# 上游基线（1.1.1，不含本次 1.3.0 改动）
+# dsh plugin --profile web add github:sun04222/dsh-prompt-enhance
 
 # 装了 dsh-market / dsh-m 的话，也可以直接在市场里搜「提示词增强」一键安装
 ```
@@ -215,7 +218,7 @@ WorkBuddy 侧证据（仅用于确认契约，未复制其文本或代码；安�
 安装（三种等价方式）：
 
 ```powershell
-dsh plugin --profile web add github:sun04222/dsh-prompt-enhance   # 从 GitHub 安装
+dsh plugin --profile web add github:he523/dsh-prompt-enhance   # 从 GitHub 安装（1.3.0）
 # 或在 dsh-market / dsh-m 市场里搜「提示词增强」一键安装
 # 或本地开发：把本目录作为 bundle 安装（plugin_manager 的 install_bundle，target 传绝对路径）
 ```

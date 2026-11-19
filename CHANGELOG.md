@@ -2,6 +2,8 @@
 
 ## 1.3.0
 
+- Repository: published to https://github.com/he523/dsh-prompt-enhance as a fork of the upstream sun04222/dsh-prompt-enhance baseline (which remains at 1.1.1). `package.json` metadata and the README install command now point at this repository, so `github:he523/dsh-prompt-enhance` installs the 1.3.0 tree; the upstream base commit is recorded in LOCAL-INSTALL.md.
+
 - Architecture: extracted the shared enhancement lifecycle into `enhance.js` and its small `createEnhancer()` interface. Input short-circuiting, model routing, the single LLM completion, bounded stream collection, cancellation/timeout and finalisation now live behind one Host-independent core; `index.js` retains tool registration, configuration and the Web transport adapter.
 - Host hardening: non-integer values returned by `connection.requestRejection` now fail closed with 403 instead of reaching the HTTP response layer. Existing fixed envelopes, route precedence, same-origin trust checks and body/output limits remain unchanged.
 - Client hardening: cancellation now uses the live in-flight controller rather than waiting for a React render, so an immediate second click cannot send a duplicate request. Draft revisions invalidate stale results even when the user edits and then restores the original text while waiting.
